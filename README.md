@@ -92,10 +92,12 @@ Modelos independentes por produto (XGBoost e LightGBM), com tuning bayesiano via
 
 | Produto | XGBoost | LightGBM |
 |---|---|---|
-| GLP | -4.4% | -4.5% |
-| Gasolina | -13.8% | -19.0% |
-| Etanol | -12.3% | -9.2% |
-| Diesel | -18.5% | -37.9% |
+| GLP | -4.4% | -5.4% |
+| Gasolina | -13.8% | -16.6% |
+| Etanol | -12.3% | -13.3% |
+| Diesel | -18.5% | -15.5% |
+
+*(números da versão final do pipeline, após correção de um bug de cálculo duplicado do resíduo identificado durante o desenvolvimento — ver seção de diagnóstico)*
 
 ---
 
