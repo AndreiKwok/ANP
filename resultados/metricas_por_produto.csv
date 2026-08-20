@@ -1,0 +1,5 @@
+produto,mae_baseline_val,mae_modelo_val,melhora_val_%,mae_baseline_teste,mae_modelo_teste,melhora_teste_%,rmse_modelo_teste,melhores_params
+GLP,0.9912,1.04,-4.92,1.0851,1.1254,-3.71,2.0982,"{'max_depth': 3, 'learning_rate': 0.01111412371148226, 'n_estimators': 200, 'subsample': 0.9451585688678993, 'colsample_bytree': 0.4373598581374728, 'min_child_weight': 2}"
+ETANOL,0.0476,0.0536,-12.58,0.0552,0.06,-8.77,0.1191,"{'max_depth': 3, 'learning_rate': 0.01001292025316385, 'n_estimators': 200, 'subsample': 0.7228316402284493, 'colsample_bytree': 0.527606146351434, 'min_child_weight': 3}"
+DIESEL,0.0634,0.0672,-6.09,0.0815,0.0992,-21.73,0.1793,"{'max_depth': 7, 'learning_rate': 0.01524943057178046, 'n_estimators': 200, 'subsample': 0.7276623466798334, 'colsample_bytree': 0.8249776871701646, 'min_child_weight': 7}"
+GASOLINA,0.0484,0.0525,-8.5,0.0597,0.0672,-12.55,0.1253,"{'max_depth': 5, 'learning_rate': 0.011793304853862468, 'n_estimators': 200, 'subsample': 0.509986248182318, 'colsample_bytree': 0.8632322756876879, 'min_child_weight': 6}"
