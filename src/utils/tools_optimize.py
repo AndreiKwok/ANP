@@ -12,55 +12,6 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
-def objetivo_optuna(X_train, y_residuo_train, df_train, tscv, trial, modelo="XGB"):
-    # params = {
-    #     "max_depth": trial.suggest_int("max_depth", 3, 8),
-    #     "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-    #     "n_estimators": trial.suggest_int(
-    #         "n_estimators", 200, 800, step=100
-    #     ),  # n_estimators
-    #     "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-    #     "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
-    #     "min_child_weight": trial.suggest_int("min_child_weight", 1, 7),
-    #     "random_state": 42,
-    # }
-    params = {
-        "max_depth": trial.suggest_int("max_depth", 3, 10),
-        "num_leaves": trial.suggest_int("num_leaves", 15, 255),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-        "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
-        "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
-        "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
-        "random_state": 42,
-        "verbosity": -1,
-    }
-    maes_fold = []
-
-    for train_idx, val_idx in tscv.split(X_train):
-        X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-        y_tr, y_val = y_residuo_train.iloc[train_idx], y_residuo_train.iloc[val_idx]
-
-        if modelo == "XGB":
-            modelo = XGBRegressor(**params)
-        else:
-            modelo = lgb.LGBMRegressor(**params)  #
-        modelo.fit(X_tr, y_tr)
-
-        pred_residuo = modelo.predict(X_val)
-
-        lag1_val = df_train.iloc[val_idx][COL_LAG1].values
-        preco_real = df_train.iloc[val_idx][COL_TARGET].values
-        preco_pred = lag1_val + pred_residuo
-
-        mae = mean_absolute_error(preco_real, preco_pred)
-        maes_fold.append(mae)
-
-    return float(np.mean(maes_fold))
-
-
 def prepara_X_y(df, colunas_remover, train_or_test="test"):
     # if train_or_test.lower() == "test":
     X = df.drop(columns=colunas_remover, errors="ignore")

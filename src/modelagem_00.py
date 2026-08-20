@@ -2,7 +2,8 @@
 Pipeline de modelagem — treino, tuning (Optuna) e avaliação
 segmentado por produto (GLP, GASOLINA, ETANOL, DIESEL).
 
-
+Suporta os algoritmos XGBoost ("XGB") e LightGBM ("LGBM"), selecionáveis
+via o parâmetro `modelo` em qualquer nível do pipeline.
 """
 
 import os
@@ -20,8 +21,9 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from utils.tools_optimize import *
 
+# ──────────────────────────────────────────────────────────────────────────
 # Configuração central — única fonte de verdade para as colunas do modelo
-
+# ──────────────────────────────────────────────────────────────────────────
 
 COLUNAS_REMOVER_BASE = [
     "price_sale_median",
@@ -37,10 +39,102 @@ COLUNAS_REMOVER_BASE = [
 COL_TARGET = "price_sale_median"
 COL_LAG1 = "price_sale_median_lag_1"
 
+MODELOS_VALIDOS = {"XGB", "LGBM"}
+
+
+def _validar_modelo(modelo: str):
+    modelo = modelo.upper()
+    if modelo not in MODELOS_VALIDOS:
+        raise ValueError(f"modelo deve ser um de {MODELOS_VALIDOS}, recebido: {modelo}")
+    return modelo
+
+
+def instanciar_regressor(modelo: str, params: dict):
+    """
+    Fábrica única de regressores — garante que XGB e LGBM sejam
+    instanciados de forma consistente em todo o pipeline.
+    """
+    modelo = _validar_modelo(modelo)
+    if modelo == "XGB":
+        return XGBRegressor(**params)
+    return lgb.LGBMRegressor(**params)
+
+
+def espaco_busca_optuna(trial, modelo: str) -> dict:
+    """
+    Define o espaço de hiperparâmetros do Optuna de acordo com o algoritmo.
+    """
+    modelo = _validar_modelo(modelo)
+
+    if modelo == "XGB":
+        return {
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 7),
+            "random_state": 42,
+        }
+
+    # LGBM
+    return {
+        "max_depth": trial.suggest_int("max_depth", 3, 10),
+        "num_leaves": trial.suggest_int("num_leaves", 15, 255),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+        "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
+        "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+        "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+        "random_state": 42,
+        "verbosity": -1,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Função objetivo do Optuna (genérica, reaproveitável entre produtos/algoritmos)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def objetivo_optuna(
+    X_train, y_residuo_train, df_train, tscv, trial, modelo: str = "XGB"
+):
+    modelo = _validar_modelo(modelo)
+    params = espaco_busca_optuna(trial, modelo)
+
+    maes_fold = []
+
+    for train_idx, val_idx in tscv.split(X_train):
+        X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+        y_tr, y_val = y_residuo_train.iloc[train_idx], y_residuo_train.iloc[val_idx]
+
+        # Nome local diferente do parâmetro `modelo` (string) — evita shadowing
+        regressor = instanciar_regressor(modelo, params)
+        regressor.fit(X_tr, y_tr)
+
+        pred_residuo = regressor.predict(X_val)
+
+        lag1_val = df_train.iloc[val_idx][COL_LAG1].values
+        preco_real = df_train.iloc[val_idx][COL_TARGET].values
+        preco_pred = lag1_val + pred_residuo
+
+        mae = mean_absolute_error(preco_real, preco_pred)
+        maes_fold.append(mae)
+
+    return float(np.mean(maes_fold))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Resultado estruturado de cada produto
+# ──────────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class ResultadoProduto:
     produto: str
+    modelo: str = "XGB"
     melhores_params: dict = field(default_factory=dict)
 
     mae_baseline_val: float = None
@@ -62,6 +156,7 @@ class ResultadoProduto:
     def resumo(self):
         return {
             "produto": self.produto,
+            "modelo": self.modelo,
             "mae_baseline_val": (
                 round(self.mae_baseline_val, 4) if self.mae_baseline_val else None
             ),
@@ -107,115 +202,11 @@ def alinhar_colunas(X: pd.DataFrame, colunas_referencia: list) -> pd.DataFrame:
     return X[colunas_referencia]
 
 
-# Resultado estruturado de cada produto
-class TratamentoIniciaisDF:
-    def __init__(
-        self, path_df: pd.DataFrame = rf"{os.getcwd()}\data\dados_anp_modelado.parquet"
-    ):
-
-        self.df = pd.read_parquet(path_df)
-        self.df.index = self.df["dt_week"]
-        self.df = self.df.drop(columns=["dt_week"])
-
-    def apply_dummy_cat_var(self):
-        col_cat = [
-            coluna
-            for coluna, tipo in self.df.dtypes.items()
-            if tipo not in ["float64", "int64", "float32", "int32"]
-        ]
-        print(col_cat)
-        self.df_dummy = pd.get_dummies(
-            self.df, columns=col_cat, prefix=col_cat, prefix_sep="_"
-        )
-        # drop em columns exogenas que não servirao muito
-        self.df_dummy = self.df_dummy.drop(
-            columns=["High_BZ=F", "Low_BZ=F", "Open_BZ=F", "Volume_BZ=F"]
-        )
-        cols_bool = self.df_dummy.select_dtypes(include="bool").columns
-        self.df_dummy[cols_bool] = self.df_dummy[cols_bool].astype(int)
-        return self.df_dummy
-
-    def apply_filters_date(self):
-        """Aplicando o filtros de datas para definir os df`s train, val e test"""
-        self.df_dummy = self.apply_dummy_cat_var()
-
-        self.df_train = self.df_dummy[
-            ((self.df_dummy.index.year >= 2016) & (self.df_dummy.index.year < 2025))
-            | ((self.df_dummy.index.year == 2025) & (self.df_dummy.index.month <= 4))
-        ]
-
-        self.df_val = self.df_dummy[
-            (self.df_dummy.index.year == 2025)
-            & (self.df_dummy.index.month >= 5)
-            & (self.df_dummy.index.month <= 8)
-        ]
-
-        self.df_test = self.df_dummy[
-            ((self.df_dummy.index.year == 2025) & (self.df_dummy.index.month >= 9))
-            | ((self.df_dummy.index.year == 2026) & (self.df_dummy.index.month <= 8))
-        ]
-
-        return self.df_train, self.df_val, self.df_test
-
-    def prepara_df_produto(self, df: pd.DataFrame, produto: str):
-        df_produto = df[df[f"Produto_{produto}"] == True].copy()
-        cols_produto = [c for c in df_produto.columns if c.startswith("Produto_")]
-        df_produto = df_produto.drop(columns=cols_produto)
-        return df_produto
-
-
-# Função objetivo do Optuna (genérica, reaproveitável entre produtos)
-def objetivo_optuna(X_train, y_residuo_train, df_train, tscv, trial, modelo="XGB"):
-    if modelo == "XGB":
-        params = {
-            "max_depth": trial.suggest_int("max_depth", 3, 8),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-            "n_estimators": trial.suggest_int(
-                "n_estimators", 200, 800, step=100
-            ),  # n_estimators
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
-            "min_child_weight": trial.suggest_int("min_child_weight", 1, 7),
-            "random_state": 42,
-        }
-    else:
-        params = {
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "num_leaves": trial.suggest_int("num_leaves", 15, 255),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-            "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
-            "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
-            "random_state": 42,
-            "verbosity": -1,
-        }
-    maes_fold = []
-
-    for train_idx, val_idx in tscv.split(X_train):
-        X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-        y_tr, y_val = y_residuo_train.iloc[train_idx], y_residuo_train.iloc[val_idx]
-        if modelo == "XGB":
-            modelo = XGBRegressor(**params)
-        else:
-            modelo = lgb.LGBMRegressor(**params)
-        modelo.fit(X_tr, y_tr)
-
-        pred_residuo = modelo.predict(X_val)
-
-        lag1_val = df_train.iloc[val_idx][COL_LAG1].values
-        preco_real = df_train.iloc[val_idx][COL_TARGET].values
-        preco_pred = lag1_val + pred_residuo
-
-        mae = mean_absolute_error(preco_real, preco_pred)
-        maes_fold.append(mae)
-
-    return float(np.mean(maes_fold))
-
-
+# ──────────────────────────────────────────────────────────────────────────
 # Orquestrador principal — roda o pipeline completo para um produto
+# ──────────────────────────────────────────────────────────────────────────
+
+
 class PipelineProduto:
     """
     Executa, para um único produto:
@@ -224,6 +215,12 @@ class PipelineProduto:
       3. Avaliação no df_val (comparação com baseline)
       4. Avaliação única no df_test (resultado final)
       5. Treino do modelo de produção (train + val + teste combinados)
+
+    Parameters
+    ----------
+    modelo : str
+        "XGB" (padrão) ou "LGBM" — define o algoritmo usado em TODAS as
+        etapas (Optuna, validação, teste e produção) de forma consistente.
     """
 
     def __init__(
@@ -244,12 +241,12 @@ class PipelineProduto:
         self.n_trials = n_trials
         self.verbose = verbose
         self.tscv = TimeSeriesSplit(n_splits=n_splits)
-        self.resultado = ResultadoProduto(produto=produto)
-        self.modelo = modelo
+        self.modelo = _validar_modelo(modelo)
+        self.resultado = ResultadoProduto(produto=produto, modelo=self.modelo)
 
     def log(self, msg):
         if self.verbose:
-            print(f"[{self.produto}] {msg}")
+            print(f"[{self.produto} | {self.modelo}] {msg}")
 
     # ---- Etapa 1: Optuna -------------------------------------------------
     def _rodar_optuna(self):
@@ -261,7 +258,12 @@ class PipelineProduto:
         self.resultado.colunas_modelo = X_train.columns.tolist()
 
         objetivo_fn = partial(
-            objetivo_optuna, X_train, y_residuo_train, self.df_train, self.tscv
+            objetivo_optuna,
+            X_train,
+            y_residuo_train,
+            self.df_train,
+            self.tscv,
+            modelo=self.modelo,
         )
 
         study = optuna.create_study(direction="minimize")
@@ -276,26 +278,24 @@ class PipelineProduto:
         return X_train, y_train_real, y_residuo_train, lag1_train
 
     # ---- Etapa 2: treino de validação -------------------------------------
-    def _treinar_modelo_validacao(self, X_train, y_residuo_train, modelo="XGB"):
+    def _treinar_modelo_validacao(self, X_train, y_residuo_train):
         params = dict(self.resultado.melhores_params)
         params["random_state"] = 42
-        if modelo == "XGB":
-            modelo = XGBRegressor(**params)  #
-        else:
-            modelo = lgb.LGBMRegressor(**params)
-        modelo.fit(X_train, y_residuo_train)
 
-        self.resultado.modelo_validacao = modelo
-        return modelo
+        regressor = instanciar_regressor(self.modelo, params)
+        regressor.fit(X_train, y_residuo_train)
+
+        self.resultado.modelo_validacao = regressor
+        return regressor
 
     # ---- Etapa 3: avaliação em df_val -------------------------------------
-    def _avaliar_validacao(self, modelo):
+    def _avaliar_validacao(self, regressor):
         X_val, y_val_real, lag1_val = prepara_X_y(
             self.df_val, colunas_remover=COLUNAS_REMOVER_BASE
         )
         X_val = alinhar_colunas(X_val, self.resultado.colunas_modelo)
 
-        pred_residuo = modelo.predict(X_val)
+        pred_residuo = regressor.predict(X_val)
         pred_preco = lag1_val.values + pred_residuo
 
         mae_modelo = mean_absolute_error(y_val_real, pred_preco)
@@ -310,13 +310,13 @@ class PipelineProduto:
         )
 
     # ---- Etapa 4: avaliação final em df_test -------------------------------
-    def _avaliar_teste(self, modelo):
+    def _avaliar_teste(self, regressor):
         X_teste, y_teste_real, lag1_teste = prepara_X_y(
             self.df_test, colunas_remover=COLUNAS_REMOVER_BASE
         )
         X_teste = alinhar_colunas(X_teste, self.resultado.colunas_modelo)
 
-        pred_residuo = modelo.predict(X_teste)
+        pred_residuo = regressor.predict(X_teste)
         pred_preco = lag1_teste.values + pred_residuo
 
         mae_modelo = mean_absolute_error(y_teste_real, pred_preco)
@@ -334,7 +334,7 @@ class PipelineProduto:
         )
 
     # ---- Etapa 5: modelo de produção (treina com tudo) ----------------------
-    def _treinar_modelo_producao(self, modelo="XGB"):
+    def _treinar_modelo_producao(self):
         df_producao = pd.concat([self.df_train, self.df_val, self.df_test])
         X_prod, y_prod_real, lag1_prod = prepara_X_y(
             df_producao, colunas_remover=COLUNAS_REMOVER_BASE
@@ -343,13 +343,11 @@ class PipelineProduto:
 
         params = dict(self.resultado.melhores_params)
         params["random_state"] = 42
-        if modelo == "XGB":
-            modelo_producao = XGBRegressor(**params)
-        else:
-            modelo_producao = lgb.LGBMRegressor(**params)
-        modelo_producao.fit(X_prod, y_prod_residuo)
 
-        self.resultado.modelo_producao = modelo_producao
+        regressor_producao = instanciar_regressor(self.modelo, params)
+        regressor_producao.fit(X_prod, y_prod_residuo)
+
+        self.resultado.modelo_producao = regressor_producao
         self.log("Modelo de produção treinado com train+val+teste combinados.")
 
     # ---- Execução completa ---------------------------------------------------
@@ -357,9 +355,9 @@ class PipelineProduto:
         self.log("Iniciando pipeline...")
         X_train, y_train_real, y_residuo_train, lag1_train = self._rodar_optuna()
 
-        modelo_val = self._treinar_modelo_validacao(X_train, y_residuo_train)
-        self._avaliar_validacao(modelo_val)
-        self._avaliar_teste(modelo_val)
+        regressor_val = self._treinar_modelo_validacao(X_train, y_residuo_train)
+        self._avaliar_validacao(regressor_val)
+        self._avaliar_teste(regressor_val)
 
         self._treinar_modelo_producao()
 
@@ -367,10 +365,15 @@ class PipelineProduto:
         return self.resultado
 
 
+# ──────────────────────────────────────────────────────────────────────────
 # Orquestrador geral — roda os 4 produtos e consolida os resultados
+# ──────────────────────────────────────────────────────────────────────────
+
+
 def rodar_pipeline_completo(
     tratamento,
     produtos=("GLP", "GASOLINA", "ETANOL", "DIESEL"),
+    modelo: str = "XGB",
     n_splits=8,
     n_trials=50,
     salvar_modelos=True,
@@ -380,7 +383,9 @@ def rodar_pipeline_completo(
     """
     tratamento: instância já inicializada de TratamentoIniciaisDF,
                 com apply_filters_date() já executado (ou será executado aqui).
+    modelo: "XGB" ou "LGBM" — propagado para todos os produtos.
     """
+    modelo = _validar_modelo(modelo)
     df_train, df_val, df_test = tratamento.apply_filters_date()
 
     os.makedirs(pasta_modelos, exist_ok=True)
@@ -398,6 +403,7 @@ def rodar_pipeline_completo(
             df_train=df_train_p,
             df_val=df_val_p,
             df_test=df_test_p,
+            modelo=modelo,
             n_splits=n_splits,
             n_trials=n_trials,
         )
@@ -405,24 +411,31 @@ def rodar_pipeline_completo(
         resultados[produto] = resultado
 
         if salvar_modelos:
+            sufixo = modelo.lower()
             resultado.modelo_producao.save_model(
-                os.path.join(pasta_modelos, f"modelo_producao_{produto.lower()}.json")
+                os.path.join(
+                    pasta_modelos, f"modelo_producao_{produto.lower()}_{sufixo}.json"
+                )
             )
             resultado.modelo_validacao.save_model(
-                os.path.join(pasta_modelos, f"modelo_validacao_{produto.lower()}.json")
+                os.path.join(
+                    pasta_modelos, f"modelo_validacao_{produto.lower()}_{sufixo}.json"
+                )
             )
             with open(
-                os.path.join(pasta_modelos, f"colunas_{produto.lower()}.json"), "w"
+                os.path.join(pasta_modelos, f"colunas_{produto.lower()}_{sufixo}.json"),
+                "w",
             ) as f:
                 json.dump(resultado.colunas_modelo, f, indent=2)
 
     # Consolida métricas de todos os produtos numa tabela só
     df_resumo = pd.DataFrame([r.resumo() for r in resultados.values()])
     df_resumo.to_csv(
-        os.path.join(pasta_resultados, "metricas_por_produto.csv"), index=False
+        os.path.join(pasta_resultados, f"metricas_por_produto_{modelo.lower()}.csv"),
+        index=False,
     )
 
-    print("\n=== RESUMO FINAL ===")
+    print(f"\n=== RESUMO FINAL ({modelo}) ===")
     print(df_resumo.to_string(index=False))
 
     return resultados, df_resumo
@@ -430,9 +443,21 @@ def rodar_pipeline_completo(
 
 if __name__ == "__main__":
     tratamento = TratamentoIniciaisDF()
-    resultados, df_resumo = rodar_pipeline_completo(
+
+    # Exemplo: rodar para os dois algoritmos e comparar
+    resultados_xgb, df_resumo_xgb = rodar_pipeline_completo(
         tratamento,
         produtos=("GLP", "ETANOL", "DIESEL", "GASOLINA"),
+        modelo="XGB",
+        n_splits=8,
+        n_trials=50,
+        salvar_modelos=False,
+    )
+
+    resultados_lgbm, df_resumo_lgbm = rodar_pipeline_completo(
+        tratamento,
+        produtos=("GLP", "ETANOL", "DIESEL", "GASOLINA"),
+        modelo="LGBM",
         n_splits=8,
         n_trials=50,
         salvar_modelos=False,
