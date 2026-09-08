@@ -441,24 +441,24 @@ def rodar_pipeline_completo(
     return resultados, df_resumo
 
 
-if __name__ == "__main__":
-    tratamento = TratamentoIniciaisDF()
+# if __name__ == "__main__":
+#     tratamento = TratamentoIniciaisDF()
 
-    # Exemplo: rodar para os dois algoritmos e comparar
-    resultados_xgb, df_resumo_xgb = rodar_pipeline_completo(
-        tratamento,
-        produtos=("GLP", "ETANOL", "DIESEL", "GASOLINA"),
-        modelo="XGB",
-        n_splits=8,
-        n_trials=50,
-        salvar_modelos=False,
-    )
+#     # Exemplo: rodar para os dois algoritmos e comparar
+#     resultados_xgb, df_resumo_xgb = rodar_pipeline_completo(
+#         tratamento,
+#         produtos=("GLP", "ETANOL", "DIESEL", "GASOLINA"),
+#         modelo="XGB",
+#         n_splits=8,
+#         n_trials=50,
+#         salvar_modelos=False,
+#     )
 
-    resultados_lgbm, df_resumo_lgbm = rodar_pipeline_completo(
-        tratamento,
-        produtos=("GLP", "ETANOL", "DIESEL", "GASOLINA"),
-        modelo="LGBM",
-        n_splits=8,
-        n_trials=50,
-        salvar_modelos=False,
-    )
+#     resultados_lgbm, df_resumo_lgbm = rodar_pipeline_completo(
+#         tratamento,
+#         produtos=("GLP", "ETANOL", "DIESEL", "GASOLINA"),
+#         modelo="LGBM",
+#         n_splits=8,
+#         n_trials=50,
+#         salvar_modelos=False,
+#     )
