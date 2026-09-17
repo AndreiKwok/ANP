@@ -7,12 +7,16 @@ __pycache__/
 *.so
 
 # data
-data/
+data/*
 models/
 *.parquet
 *.csv
 *.pkl
 *.json
+
+# exceções: artefatos pequenos necessários para o deploy do app Streamlit
+!data/dados_anp_modelado.parquet
+!resultados/previsoes_horizonte.csv
 
 # Distribution / packaging
 .Python

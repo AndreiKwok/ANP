@@ -5,4 +5,13 @@ seaborn
 scipy
 scikit-learn
 xgboost
+lightgbm
 optuna
+streamlit
+plotly
+requests
+beautifulsoup4
+yfinance
+holidays
+python-dateutil
+easygui

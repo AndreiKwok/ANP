@@ -2,12 +2,15 @@ import warnings
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+import gc
 import requests
 import urllib3  # Para capturar erros de protocolo
 from dateutil.relativedelta import relativedelta
 from datetime import datetime
 import pandas as pd
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import zipfile
 from datetime import date
 import matplotlib.pyplot as plt
@@ -114,9 +117,14 @@ def processar_dataframe(df):
 
 
 # region get_last_date
-# Arquivo bruto, sem variaveis exogenas
-df_og = pd.read_parquet(f"{base_path}\\anp.parquet")
-print("leu o arquivo original")
+# Lemos só a coluna de data via pyarrow (leitura colunar) para descobrir a
+# última data já presente. Carregar as ~49M linhas x 16 colunas inteiras
+# como pandas (dtype object, um objeto Python por célula de texto) passa
+# facilmente da RAM disponível só para achar uma data máxima — foi
+# justamente isso que causou o access violation (exit code 3221225477)
+# na primeira tentativa de rodar este script.
+df_og = pq.read_table(f"{base_path}\\anp.parquet", columns=["Data da Coleta"]).to_pandas()
+print("leu a coluna de data do arquivo original")
 
 
 class ExtractLastDate:
@@ -324,6 +332,8 @@ print("Processamento concluído. Concatenando DataFrames...")
 # --- 6. Finalização ---
 if dfs:  # Garante que a lista não está vazia
     df_extract = pd.concat(dfs, ignore_index=True)
+    del dfs
+    gc.collect()
 
     # Passos finais de limpeza
     df_extract = df_extract.drop_duplicates()
@@ -331,14 +341,42 @@ if dfs:  # Garante que a lista não está vazia
         by=["Data da Coleta", "Produto", "Cep", "CNPJ da Revenda"]
     )
 
-    # concatenando df extraido com o ultimo arquivo .parquet(df_og)
-    final_df = pd.concat([df_og, df_extract], ignore_index=True)
+    # Mantém só o que é realmente novo: os CSVs/ZIPs locais em
+    # data/download_gov/csv e /zip continuam na pasta entre execuções (o
+    # loop de scraping está comentado e não os remove), então sem esse
+    # filtro por data o mesmo conteúdo seria reconcatenado a cada rodada,
+    # duplicando linhas indefinidamente.
+    ultima_data_existente = df_og["Data da Coleta"].max()
+    linhas_processadas = len(df_extract)
+    df_extract = df_extract[df_extract["Data da Coleta"] > ultima_data_existente]
+    print(
+        f"Linhas novas após filtrar por data (> {ultima_data_existente.date()}): "
+        f"{len(df_extract)} de {linhas_processadas} processadas"
+    )
+
     print("Salvando arquivo final anp.parquet...")
     try:
-        final_df.to_parquet(f"{base_path}\\anp.parquet", index=False)
+        # Concatenação via pyarrow, não pandas: o arquivo antigo tem ~49M
+        # linhas majoritariamente de texto. Como Arrow Table isso fica em
+        # buffers colunares compactos; como DataFrame pandas (dtype
+        # object, um objeto Python por célula de texto) a mesma massa de
+        # dados não cabe na RAM disponível — foi isso que causou o access
+        # violation (exit code 3221225477) na tentativa anterior.
+        tabela_extract = pa.Table.from_pandas(df_extract, preserve_index=False)
+        del df_extract
+        gc.collect()
+
+        tabela_og = pq.read_table(f"{base_path}\\anp.parquet")
+        tabela_final = pa.concat_tables(
+            [tabela_og, tabela_extract], promote_options="default"
+        )
+        del tabela_og, tabela_extract
+        gc.collect()
+
+        pq.write_table(tabela_final, f"{base_path}\\anp.parquet")
+        print("Processo finalizado!")
+        print(f"Linhas finais em anp.parquet: {tabela_final.num_rows}")
     except Exception as e:
         print("ERRO AO TENTAR SALVAR ARQUIVO: anp.parquet:", e)
-    print("Processo finalizado!")
-    final_df.info()
 else:
     print("Nenhum dado foi processado. Verifique os downloads e os caminhos.")
