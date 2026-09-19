@@ -1,6 +1,6 @@
 # Previsão de Preços de Combustíveis — ANP
 
-Pipeline completo de Data Science para previsão do preço semanal de venda de combustíveis (Gasolina, Etanol, Diesel e GLP) por estado brasileiro, a partir de dados públicos da ANP enriquecidos com indicadores macroeconômicos.
+Pipeline completo de Data Science para previsão do preço semanal de venda de combustíveis (Gasolina, Etanol, Diesel e GLP) por estado brasileiro, a partir de dados públicos da ANP enriquecidos com indicadores macroeconômicos. Inclui um app Streamlit com IA conversacional ("Genie") para consultar as previsões em linguagem natural.
 
 ---
 
@@ -111,33 +111,79 @@ A confirmação cruzada com dois algoritmos independentes (XGBoost e LightGBM), 
 
 Essa conclusão não invalida o pipeline construído — ao contrário, valida a importância de um processo de validação temporal rigoroso e de comparação sistemática contra um baseline bem definido, prática que evitou reportar um resultado enganosamente otimista.
 
+Justamente por isso, **o produto final não esconde essa limitação**: o modelo de produção (LightGBM + segmentação por cluster) é servido lado a lado com o baseline de persistência em toda a cadeia — na tabela de previsões, no app e nas respostas do agente de IA — em vez de apresentar só a previsão do modelo como se fosse comprovadamente superior.
+
+---
+
+## Do treino ao produto final
+
+Além da fase de pesquisa (EDA, testes de hipótese, comparação de modelos, documentada acima), o projeto tem um pipeline de produção completo, do dado bruto ao app:
+
+```
+dados brutos (ANP) → feature engineering → treino final (LGBM + cluster)
+                                              → inferência (previsão 4 semanas)
+                                              → app Streamlit + Genie (IA)
+```
+
+- **Treino de produção** (`src/modelagem_06_final_treino.ipynb`): re-treina LightGBM com segmentação por cluster para os 4 produtos, reaproveitando os hiperparâmetros já otimizados via Optuna. Exporta os modelos (`models/`), as colunas de referência e a tabela de MAE por estado (`resultados/mae_por_produto_estado.csv`, 108 linhas: 27 estados × 4 produtos).
+- **Inferência** (`src/inferencia_previsao.ipynb`): carrega os modelos treinados e gera a previsão recursiva de 4 semanas à frente por produto/estado (`resultados/previsoes_horizonte.csv`, 432 linhas). A cada semana prevista, o modelo alimenta seus próprios `lag`s recursivamente; as variáveis exógenas (dólar, Brent, IPCA, SELIC, PIB) ficam **congeladas no último valor conhecido** durante todo o horizonte — limitação assumida e documentada. O baseline de persistência (repetir o último preço real conhecido) é calculado junto, sempre para comparação lado a lado.
+- **Orquestração** (`run_pipeline.py`): roda a cadeia completa — ingestão → feature engineering → treino final → inferência — com fail-fast (para no primeiro erro). Uso: `python run_pipeline.py` a partir da raiz.
+- **App Streamlit** (`app.py`): visualização interativa por produto/estado — preço mais recente, MAE do modelo e do baseline, gráfico de histórico + previsão (modelo vs. baseline sempre lado a lado), e ranking de MAE entre estados. Uso: `streamlit run app.py`.
+- **Genie — agente de IA** (`genie.py`): chat embutido no app para responder perguntas em linguagem natural sobre os dados de `resultados/` ("qual a previsão de diesel em SP?", "compare o GLP no Sudeste", "qual estado tem o menor erro?"). Usa a API gratuita da **Groq** com **tool-calling controlado** — o LLM só pode chamar um conjunto fixo de funções Python que consultam os dados (previsão, histórico, MAE por estado, ranking, métricas gerais do modelo, cluster, comparação regional), nunca executa código arbitrário. O system prompt do agente reforça a mesma transparência do resto do projeto: sempre mencionar o baseline ao lado do modelo e citar a limitação das exógenas congeladas quando relevante.
+
 ---
 
 ## Estrutura do projeto
 
 ```
 ├── data/
-│   └── dados_anp_modelado.parquet
-├── src/
-│   ├── tratamento_iniciais.py     # classe TratamentoIniciaisDF (split temporal, dummies)
-│   ├── pipeline_modelagem.py      # orquestração: Optuna, treino, avaliação, produção
-│   └── previsao.py                # previsão recursiva N semanas à frente
+│   └── dados_anp_modelado.parquet          # histórico tratado, consumido pelo app
 ├── models/
-│   ├── modelo_validacao_<produto>.json
-│   ├── modelo_producao_<produto>.json
-│   └── colunas_<produto>.json
+│   ├── modelo_producao_<produto>_lgbm.json
+│   └── colunas_<produto>_lgbm.json
 ├── resultados/
-│   └── metricas_por_produto.csv
-├── notebooks/
-│   └── notebook_previsao_combustiveis.ipynb
+│   ├── metricas_por_produto.csv            # métricas gerais por produto (versionado)
+│   ├── metricas_por_produto_lgbm.csv       # idem, modelo de produção (LGBM)
+│   ├── mae_por_produto_estado.csv          # MAE modelo vs. baseline, por estado
+│   ├── clusters_por_produto.json           # mapeamento estado → cluster, por produto
+│   └── previsoes_horizonte.csv             # previsão final de 4 semanas (modelo + baseline)
+├── src/
+│   ├── dowloading_data.py                  # ingestão incremental (ANP + exógenas)
+│   ├── FE1.ipynb / FE2.ipynb / FE3.ipynb   # feature engineering
+│   ├── modelagem_00.py                     # pipeline reutilizável (TratamentoIniciaisDF, PipelineProduto)
+│   ├── modelagem_03_LGBM_XGB.ipynb         # comparação Estado vs. Cluster × XGB vs. LGBM
+│   ├── modelagem_06_final_treino.ipynb     # treino de produção final
+│   ├── inferencia_previsao.ipynb           # geração da previsão de horizonte
+│   └── utils/                              # helpers de EDA, avaliação, plot, clusters
+├── app.py                                  # app Streamlit (visualização + Genie)
+├── genie.py                                # agente de IA (Groq, tool-calling)
+├── run_pipeline.py                         # orquestrador do pipeline completo
+├── requirements.txt
 └── README.md
 ```
 
 ---
 
+## Como rodar
+
+```bash
+pip install -r requirements.txt
+
+# Pipeline completo (dado bruto → previsões), opcional se resultados/ já existir:
+python run_pipeline.py
+
+# App (visualização + Genie):
+cp .env.exemplo .env   # preencha GROQ_API_KEY (grátis em console.groq.com)
+streamlit run app.py
+```
+
+Sem `GROQ_API_KEY`, o app funciona normalmente — só a seção do Genie fica desabilitada até uma chave ser informada (no `.env` ou colada na sessão).
+
+---
+
 ## Stack técnica
 
-`Python` · `pandas` · `scikit-learn` · `XGBoost` · `LightGBM` · `Optuna` · `scipy.stats` · `statsmodels` · `matplotlib` / `seaborn`
+`Python` · `pandas` · `scikit-learn` · `XGBoost` · `LightGBM` · `Optuna` · `scipy.stats` · `statsmodels` · `matplotlib` / `seaborn` · `Streamlit` · `Plotly` · `Groq` (LLM, tool-calling)
 
 ---
 
@@ -145,7 +191,8 @@ Essa conclusão não invalida o pipeline construído — ao contrário, valida a
 
 - Avaliar modelos com componente de tendência explícito (regressão linear regularizada, SARIMA, Prophet) para lidar melhor com mudanças de patamar fora do range histórico.
 - Explorar abordagens de ensemble entre o baseline de persistência e os modelos baseados em árvore.
-- Plataforma de visualização (Streamlit) com integração a LLM para consulta em linguagem natural das previsões, exibindo lado a lado a previsão do modelo e do baseline para transparência sobre a incerteza envolvida.
+- Limpeza de código morto/duplicado em `src/utils/tools_optimize.py` (versões antigas de classes já redefinidas em `src/modelagem_00.py`).
+- Decisão de deploy do Streamlit — hoje o app roda só localmente; `data/`, `models/` e a maior parte de `resultados/` são gitignorados, então um deploy público exige um plano para esses artefatos (comitar só o necessário ou buscá-los de outro lugar em runtime) e configurar `GROQ_API_KEY` como secret no serviço escolhido.
 
 ---
 

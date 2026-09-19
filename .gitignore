@@ -17,6 +17,9 @@ models/
 # exceções: artefatos pequenos necessários para o deploy do app Streamlit
 !data/dados_anp_modelado.parquet
 !resultados/previsoes_horizonte.csv
+!resultados/mae_por_produto_estado.csv
+!resultados/metricas_por_produto_lgbm.csv
+!resultados/clusters_por_produto.json
 
 # Distribution / packaging
 .Python
@@ -128,7 +131,7 @@ ipython_config.py
 #pdm.toml
 .pdm-python
 .pdm-build/
-
+.claude
 # pixi
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
 #pixi.lock

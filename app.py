@@ -11,15 +11,25 @@ data/dados_anp_modelado.parquet, para exibir por produto e estado:
 Roda com: streamlit run app.py
 """
 
+import json
+import os
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from dotenv import load_dotenv
+
+import genie
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).parent
 PATH_PREVISOES = BASE_DIR / "resultados" / "previsoes_horizonte.csv"
 PATH_HISTORICO = BASE_DIR / "data" / "dados_anp_modelado.parquet"
+PATH_MAE_ESTADO = BASE_DIR / "resultados" / "mae_por_produto_estado.csv"
+PATH_METRICAS = BASE_DIR / "resultados" / "metricas_por_produto_lgbm.csv"
+PATH_CLUSTERS = BASE_DIR / "resultados" / "clusters_por_produto.json"
 
 # paleta — ver skill de dataviz: séries categóricas em ordem fixa,
 # histórico real em tinta neutra (não é uma "série" de previsão)
@@ -52,6 +62,22 @@ def carregar_historico() -> pd.DataFrame:
     return df
 
 
+@st.cache_data
+def carregar_mae_estado() -> pd.DataFrame:
+    return pd.read_csv(PATH_MAE_ESTADO)
+
+
+@st.cache_data
+def carregar_metricas() -> pd.DataFrame:
+    return pd.read_csv(PATH_METRICAS)
+
+
+@st.cache_data
+def carregar_clusters() -> dict:
+    with open(PATH_CLUSTERS, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def semana_para_timestamp(col_semana: pd.Series) -> pd.Series:
     return pd.PeriodIndex(col_semana.str.split("/").str[0], freq="W-SUN").to_timestamp()
 
@@ -76,7 +102,9 @@ st.caption(
 with st.sidebar:
     st.header("Filtros")
     produto = st.selectbox("Produto", PRODUTOS)
-    estados_disponiveis = sorted(df_previsoes.loc[df_previsoes["produto"] == produto, "estado"].unique())
+    estados_disponiveis = sorted(
+        df_previsoes.loc[df_previsoes["produto"] == produto, "estado"].unique()
+    )
     estado = st.selectbox("Estado", estados_disponiveis)
 
     st.divider()
@@ -120,46 +148,71 @@ x_prev = semana_para_timestamp(prev_sel["semana"])
 # de previsão não começarem "soltas" no gráfico
 x_modelo = pd.concat([pd.Series([x_hist[-1]]), pd.Series(x_prev)], ignore_index=True)
 y_modelo = pd.concat(
-    [pd.Series([hist_plot["price_sale_median"].iloc[-1]]), prev_sel["preco_modelo"].reset_index(drop=True)],
+    [
+        pd.Series([hist_plot["price_sale_median"].iloc[-1]]),
+        prev_sel["preco_modelo"].reset_index(drop=True),
+    ],
     ignore_index=True,
 )
 y_baseline = pd.concat(
-    [pd.Series([hist_plot["price_sale_median"].iloc[-1]]), prev_sel["preco_baseline"].reset_index(drop=True)],
+    [
+        pd.Series([hist_plot["price_sale_median"].iloc[-1]]),
+        prev_sel["preco_baseline"].reset_index(drop=True),
+    ],
     ignore_index=True,
 )
 
 fig = go.Figure()
-fig.add_trace(go.Scatter(
-    x=x_hist, y=hist_plot["price_sale_median"],
-    mode="lines", name="Histórico real",
-    line=dict(color=COR_HISTORICO, width=2),
-))
-fig.add_trace(go.Scatter(
-    x=x_modelo, y=y_modelo,
-    mode="lines+markers", name="Previsão — modelo (LGBM)",
-    line=dict(color=COR_MODELO, width=2, dash="dash"),
-    marker=dict(size=8),
-))
-fig.add_trace(go.Scatter(
-    x=x_modelo, y=y_baseline,
-    mode="lines+markers", name="Previsão — baseline (persistência)",
-    line=dict(color=COR_BASELINE, width=2, dash="dash"),
-    marker=dict(size=8),
-))
+fig.add_trace(
+    go.Scatter(
+        x=x_hist,
+        y=hist_plot["price_sale_median"],
+        mode="lines",
+        name="Histórico real",
+        line=dict(color=COR_HISTORICO, width=2),
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=x_modelo,
+        y=y_modelo,
+        mode="lines+markers",
+        name="Previsão — modelo (LGBM)",
+        line=dict(color=COR_MODELO, width=2, dash="dash"),
+        marker=dict(size=8),
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=x_modelo,
+        y=y_baseline,
+        mode="lines+markers",
+        name="Previsão — baseline (persistência)",
+        line=dict(color=COR_BASELINE, width=2, dash="dash"),
+        marker=dict(size=8),
+    )
+)
 fig.update_layout(
     height=440,
     margin=dict(l=10, r=10, t=10, b=10),
     xaxis=dict(
-        title=None, gridcolor=COR_GRADE, linecolor=COR_EIXO_MUTED,
+        title=None,
+        gridcolor=COR_GRADE,
+        linecolor=COR_EIXO_MUTED,
         tickfont=dict(color=COR_HISTORICO),
     ),
     yaxis=dict(
         title=dict(text="Preço mediano (R$)", font=dict(color=COR_HISTORICO)),
-        gridcolor=COR_GRADE, linecolor=COR_EIXO_MUTED,
+        gridcolor=COR_GRADE,
+        linecolor=COR_EIXO_MUTED,
         tickfont=dict(color=COR_HISTORICO),
     ),
     legend=dict(
-        orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="left",
+        x=0,
         font=dict(color=COR_HISTORICO),
     ),
     plot_bgcolor="#fcfcfb",
@@ -173,11 +226,13 @@ st.caption(
 )
 
 st.subheader("Previsão detalhada (4 semanas)")
-tabela = prev_sel[["semana", "preco_modelo", "preco_baseline"]].rename(columns={
-    "semana": "Semana",
-    "preco_modelo": "Previsão — modelo",
-    "preco_baseline": "Previsão — baseline",
-})
+tabela = prev_sel[["semana", "preco_modelo", "preco_baseline"]].rename(
+    columns={
+        "semana": "Semana",
+        "preco_modelo": "Previsão — modelo",
+        "preco_baseline": "Previsão — baseline",
+    }
+)
 st.dataframe(tabela, hide_index=True, use_container_width=True)
 
 with st.expander(f"Comparar erro (MAE) entre estados — {produto}"):
@@ -189,19 +244,28 @@ with st.expander(f"Comparar erro (MAE) entre estados — {produto}"):
     cores_barras = [
         "#184f95" if e == estado else COR_SEQUENCIAL for e in mae_produto["estado"]
     ]
-    fig_mae = go.Figure(go.Bar(
-        x=mae_produto["mae_modelo_estado"], y=mae_produto["estado"],
-        orientation="h", marker_color=cores_barras,
-    ))
+    fig_mae = go.Figure(
+        go.Bar(
+            x=mae_produto["mae_modelo_estado"],
+            y=mae_produto["estado"],
+            orientation="h",
+            marker_color=cores_barras,
+        )
+    )
     fig_mae.update_layout(
         height=650,
         margin=dict(l=10, r=10, t=10, b=10),
         xaxis=dict(
-            title=dict(text="MAE do modelo (menor é melhor)", font=dict(color=COR_HISTORICO)),
-            gridcolor=COR_GRADE, tickfont=dict(color=COR_HISTORICO),
+            title=dict(
+                text="MAE do modelo (menor é melhor)", font=dict(color=COR_HISTORICO)
+            ),
+            gridcolor=COR_GRADE,
+            tickfont=dict(color=COR_HISTORICO),
         ),
         yaxis=dict(
-            title=None, gridcolor=COR_GRADE, autorange="reversed",
+            title=None,
+            gridcolor=COR_GRADE,
+            autorange="reversed",
             tickfont=dict(color=COR_HISTORICO),
         ),
         plot_bgcolor="#fcfcfb",
@@ -209,3 +273,66 @@ with st.expander(f"Comparar erro (MAE) entre estados — {produto}"):
     )
     st.plotly_chart(fig_mae, use_container_width=True)
     st.caption(f"Estado selecionado ({estado}) destacado em azul escuro.")
+
+st.divider()
+st.subheader("🧞 Genie — pergunte sobre os dados ANP")
+
+arquivos_genie = [PATH_MAE_ESTADO, PATH_METRICAS, PATH_CLUSTERS]
+arquivos_faltando = [p for p in arquivos_genie if not p.exists()]
+
+if arquivos_faltando:
+    nomes = ", ".join(p.relative_to(BASE_DIR).as_posix() for p in arquivos_faltando)
+    st.info(f"Genie indisponível — faltam arquivos em resultados/: {nomes}.")
+else:
+    api_key = os.getenv("GROQ_API_KEY")  # or st.session_state.get("groq_api_key")
+    if not api_key:
+        with st.form("groq_key_form"):
+            st.caption(
+                "Chave da Groq não encontrada em GROQ_API_KEY. Cole uma chave gratuita "
+                "(console.groq.com) para usar o Genie nesta sessão — não é salva em disco."
+            )
+            chave_input = st.text_input("GROQ_API_KEY", type="password")
+            if st.form_submit_button("Usar chave") and chave_input:
+                st.session_state["groq_api_key"] = chave_input
+                st.rerun()
+    else:
+        contexto_genie = {
+            "df_previsoes": df_previsoes,
+            "df_historico": df_historico,
+            "df_mae_estado": carregar_mae_estado(),
+            "df_metricas": carregar_metricas(),
+            "clusters": carregar_clusters(),
+        }
+
+        if "genie_mensagens" not in st.session_state:
+            st.session_state["genie_mensagens"] = []
+
+        for m in st.session_state["genie_mensagens"]:
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
+
+        pergunta = st.chat_input(
+            f"Pergunte sobre {produto} em {estado}, ou qualquer outro produto/estado..."
+        )
+        if pergunta:
+            st.session_state["genie_mensagens"].append(
+                {"role": "user", "content": pergunta}
+            )
+            with st.chat_message("user"):
+                st.markdown(pergunta)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Consultando os dados..."):
+                    try:
+                        resposta = genie.responder(
+                            pergunta,
+                            st.session_state["genie_mensagens"][:-1],
+                            contexto_genie,
+                            api_key,
+                        )
+                    except Exception as exc:
+                        resposta = f"Erro ao consultar o Genie: {exc}"
+                st.markdown(resposta)
+            st.session_state["genie_mensagens"].append(
+                {"role": "assistant", "content": resposta}
+            )

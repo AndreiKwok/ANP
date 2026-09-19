@@ -9,6 +9,8 @@ lightgbm
 optuna
 streamlit
 plotly
+groq
+python-dotenv
 requests
 beautifulsoup4
 yfinance
