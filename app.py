@@ -284,12 +284,17 @@ if arquivos_faltando:
     nomes = ", ".join(p.relative_to(BASE_DIR).as_posix() for p in arquivos_faltando)
     st.info(f"Genie indisponível — faltam arquivos em resultados/: {nomes}.")
 else:
-    api_key = os.getenv("GROQ_API_KEY")  # or st.session_state.get("groq_api_key")
+    try:
+        api_key_secrets = st.secrets.get("GROQ_API_KEY")
+    except FileNotFoundError:
+        api_key_secrets = None
+    api_key = os.getenv("GROQ_API_KEY") or api_key_secrets or st.session_state.get("groq_api_key")
     if not api_key:
         with st.form("groq_key_form"):
             st.caption(
-                "Chave da Groq não encontrada em GROQ_API_KEY. Cole uma chave gratuita "
-                "(console.groq.com) para usar o Genie nesta sessão — não é salva em disco."
+                "Chave da Groq não encontrada. Configure GROQ_API_KEY no ambiente, nos "
+                "Secrets do Streamlit Cloud (Settings → Secrets), ou cole uma chave gratuita "
+                "(console.groq.com) para usar o Genie só nesta sessão — não é salva em disco."
             )
             chave_input = st.text_input("GROQ_API_KEY", type="password")
             if st.form_submit_button("Usar chave") and chave_input:
